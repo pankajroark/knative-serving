@@ -369,7 +369,7 @@ func (ks *scaler) scale(ctx context.Context, pa *autoscalingv1alpha1.PodAutoscal
 
 	logger.Infof("Scaling from %d to %d", currentScale, desiredScale)
 	if currentScale == 0 && desiredScale > 0 {
-		err := InformBaseten(ctx, ps)
+		err := InformBasetenScaleFromZero(ctx, ps)
 		if err != nil {
 			fmt.Println(err)
 		}

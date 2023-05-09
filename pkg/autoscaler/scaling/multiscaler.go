@@ -28,12 +28,21 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"knative.dev/pkg/logging/logkey"
 	autoscalingv1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
+	"knative.dev/serving/pkg/autoscaler/coldboost/boostwindow"
 	"knative.dev/serving/pkg/autoscaler/metrics"
 )
 
 // tickInterval is how often the Autoscaler evaluates the metrics
 // and issues a decision.
 const tickInterval = 2 * time.Second
+
+// Each cold boost is done for this long.
+const coldBoostPeriod = 2 * time.Minute
+const maxColdBoostsInWindow = 2
+const coldBoostCountingWindowSize = 10 * time.Minute
+
+// Todo read this per ksvc or revision from baseten
+const coldBoostEnabled = true
 
 // Decider is a resource which observes the request load of a Revision and
 // recommends a number of replicas to run.
@@ -90,6 +99,10 @@ type DeciderStatus struct {
 	// this revision needs.
 	DesiredScale int32
 
+	// Desired number of pods for the cold boost. Cold boost runs on instances
+	// with better network and disk i/o for better cold start time.
+	ColdboostDesiredScale int32
+
 	// ExcessBurstCapacity is the difference between spare capacity
 	// (how much more load the pods in the revision deployment can take before being
 	// overloaded) and the configured target burst capacity.
@@ -136,6 +149,13 @@ type scalerRunner struct {
 	// mux guards access to decider.
 	mux     sync.RWMutex
 	decider *Decider
+
+	// When was the current cold boost started.
+	// zero means no cold boost in progress.
+	coldBoostTime time.Time
+
+	// Keeps track of all the cold boosts done recently
+	coldBoostWindow *boostwindow.BoostWindow
 }
 
 func (sr *scalerRunner) latestScale() int32 {
@@ -159,17 +179,74 @@ func (sr *scalerRunner) updateLatestScale(sRes ScaleResult) bool {
 	ret := false
 	sr.mux.Lock()
 	defer sr.mux.Unlock()
+
 	if sr.decider.Status.DesiredScale != sRes.DesiredPodCount {
-		sr.decider.Status.DesiredScale = sRes.DesiredPodCount
+		sr.updateDeciderScaleWithColdBoostLogic(sRes)
 		ret = true
 	}
 
-	// If sign has changed -- then we have to update KPA.
+	// If sign has changed -- then we have to update KPA. 
 	ret = ret || !sameSign(sr.decider.Status.ExcessBurstCapacity, sRes.ExcessBurstCapacity)
 
 	// Update with the latest calculation anyway.
 	sr.decider.Status.ExcessBurstCapacity = sRes.ExcessBurstCapacity
 	return ret
+}
+
+func (sr *scalerRunner) updateDeciderScaleWithColdBoostLogic(sRes ScaleResult) {
+	if !coldBoostEnabled {
+		sr.decider.Status.DesiredScale = sRes.DesiredPodCount
+		sr.decider.Status.ColdboostDesiredScale = 0
+		sr.coldBoostTime = time.Time{}
+		return
+	}
+
+	// TODO(pankaj) Unit test this function.
+	// This is a bit complex, here's the logic:
+	// We always cold boost when scaling from zero. On such a boost we mark the coldBoostTime.
+	// For coldBoostPeriod afterward, we indicate one cold boost pod and rest regular.
+	// Cold boost gets over in following ways:
+	// 1. After cold boost period is passed
+	// 2. Desired scale drops to zero, i.e. there's no traffic
+	// We count recent cold boosts. If there are more than a certain recent cold boosts
+	// then we ensure that the regular ksvc also starts up in parallel. This is to avoid
+	// getting stuck in a situation where we are just cold boosting all the time.
+	now := time.Now()
+	currentDesiredScale := sr.decider.Status.DesiredScale
+	newDesiredScale := sRes.DesiredPodCount
+	if currentDesiredScale == 0 && sr.coldBoostTime.IsZero() {
+			// Scaling from zero, set up cold boost
+			sr.coldBoostTime = now
+
+			// Ensure coldBoostWindow
+			if sr.coldBoostWindow == nil {
+				sr.coldBoostWindow = boostwindow.NewBoostWindow(coldBoostCountingWindowSize)
+			}
+
+			// Record that cold boost was done
+			sr.coldBoostWindow.Record(time.Now())
+	}
+
+	if newDesiredScale == 0 {
+		// Scaling back to zero, cancel cold boost
+			sr.coldBoostTime = time.Time{}
+	}
+
+	if !sr.coldBoostTime.IsZero() && now.Before(sr.coldBoostTime.Add(coldBoostPeriod)) {
+		// Cold boost in progress
+		sr.decider.Status.ColdboostDesiredScale = 1
+		if sr.coldBoostWindow.Count() > maxColdBoostsInWindow {
+			// Too many cold boosts, start up regular ksvc in parallel
+			sr.decider.Status.DesiredScale = sRes.DesiredPodCount
+		} else {
+			sr.decider.Status.DesiredScale = sRes.DesiredPodCount - 1
+		}
+	} else {
+		// Cold boost not started or is over, revert to normal
+		sr.decider.Status.DesiredScale = sRes.DesiredPodCount
+		sr.decider.Status.ColdboostDesiredScale = 0
+		sr.coldBoostTime = time.Time{}
+	}
 }
 
 // MultiScaler maintains a collection of UniScalers.

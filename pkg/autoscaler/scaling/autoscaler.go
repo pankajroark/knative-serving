@@ -137,6 +137,8 @@ func (a *autoscaler) Update(deciderSpec *DeciderSpec) {
 // validScale signifies whether the desiredPodCount should be applied or not.
 // Scale is not thread safe in regards to panic state, but it's thread safe in
 // regards to acquiring the decider spec.
+// desiredColdPodCount is the calculated count of cold start pods. Right now it's one
+// or zero.
 func (a *autoscaler) Scale(logger *zap.SugaredLogger, now time.Time) ScaleResult {
 	desugared := logger.Desugar()
 	debugEnabled := desugared.Core().Enabled(zapcore.DebugLevel)
@@ -307,6 +309,7 @@ func (a *autoscaler) Scale(logger *zap.SugaredLogger, now time.Time) ScaleResult
 		)
 	}
 
+	// TODO(panka) Implement DesiredColdPodCount
 	return ScaleResult{
 		DesiredPodCount:     desiredPodCount,
 		ExcessBurstCapacity: int32(excessBCF),
