@@ -123,6 +123,10 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 		return fmt.Errorf("error scaling target: %w", err)
 	}
 
+	// TODO(pankaj) use decider.Status.ColdboostDesiredScale to scale cold boost deployment
+	// Get the node selector from baseten settings and create/update deployment
+	
+
 	mode := nv1alpha1.SKSOperationModeProxy
 
 	switch {

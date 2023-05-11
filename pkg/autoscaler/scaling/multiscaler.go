@@ -112,7 +112,8 @@ type DeciderStatus struct {
 // ScaleResult holds the scale result of the UniScaler evaluation cycle.
 type ScaleResult struct {
 	// DesiredPodCount is the number of pods Autoscaler suggests for the revision.
-	DesiredPodCount int32
+	DesiredPodCount          int32
+	DesiredColdBoostPodCount int32
 	// ExcessBurstCapacity is computed headroom of the revision taking into
 	// the account target burst capacity.
 	ExcessBurstCapacity int32
@@ -147,10 +148,6 @@ type scalerRunner struct {
 	// mux guards access to decider.
 	mux     sync.RWMutex
 	decider *Decider
-
-	// When was the current cold boost started.
-	// zero means no cold boost in progress.
-	coldBoostTime time.Time
 }
 
 func (sr *scalerRunner) latestScale() int32 {
@@ -175,27 +172,11 @@ func (sr *scalerRunner) updateLatestScale(sRes ScaleResult) bool {
 	sr.mux.Lock()
 	defer sr.mux.Unlock()
 
-	// todo get revision name and namespace here
-	coldStartSettings, err := coldstart.GetColdstartSettings(context.TODO())
-
-	if err != nil {
-		sr.logger.Errorf("Unable to get cold start settings %v", err)
-		return false
-	}
-
-	if !coldStartSettings.ColdStartEnabled {
-		if sr.decider.Status.DesiredScale != sRes.DesiredPodCount {
+	if sr.decider.Status.DesiredScale != sRes.DesiredPodCount ||
+		sr.decider.Status.ColdboostDesiredScale != sRes.DesiredColdBoostPodCount {
 			sr.decider.Status.DesiredScale = sRes.DesiredPodCount
-			ret = true
-		}
-	} else {
-		originalDesiredScale := sr.decider.Status.DesiredScale
-		originalColdboostDesiredScale := sr.decider.Status.ColdboostDesiredScale
-		sr.updateDeciderScaleWithColdBoostLogic(sRes)
-		if sr.decider.Status.DesiredScale != originalDesiredScale ||
-				originalColdboostDesiredScale != sr.decider.Status.ColdboostDesiredScale {
-			ret = true
-		}
+			sr.decider.Status.ColdboostDesiredScale = sRes.DesiredColdBoostPodCount
+		ret = true
 	}
 
 	// If sign has changed -- then we have to update KPA.
@@ -204,52 +185,6 @@ func (sr *scalerRunner) updateLatestScale(sRes ScaleResult) bool {
 	// Update with the latest calculation anyway.
 	sr.decider.Status.ExcessBurstCapacity = sRes.ExcessBurstCapacity
 	return ret
-}
-
-func (sr *scalerRunner) updateDeciderScaleWithColdBoostLogic(sRes ScaleResult) {
-	// TODO(pankaj) Unit test this function.
-	// This is a bit complex, here's the logic:
-	// We always cold boost when scaling from zero. On such a boost we mark the coldBoostTime.
-	// For coldBoostPeriod afterward, we indicate one cold boost pod and rest regular.
-	// Cold boost gets over in following ways:
-	// 1. After cold boost period is over
-	// 2. Desired scale drops to zero, i.e. there's no traffic
-	//
-	// After coldBoostKsvcTriggerPeriod we let regular ksvc scale up as well.
-	// Idea is that we don't want short bursts to start up both cold start
-	// and regular ksvc pod and pay double the price for these. But sustained
-	// traffic should trigger that scale up so cold start pod can be replaced.
-	// Overall, in occassional requests case, cold start pod can tackle the
-	// requests itself. In the more sustained requests scneario, cold start pod
-	// provides the boost then goes away in favor of the regular ksvc.
-	now := time.Now()
-	currentDesiredScale := sr.decider.Status.DesiredScale
-	newDesiredScale := sRes.DesiredPodCount
-	if currentDesiredScale == 0 && sr.coldBoostTime.IsZero() {
-		// Scaling from zero, set up cold boost
-		sr.coldBoostTime = now
-	}
-
-	if newDesiredScale == 0 {
-		// Scaling back to zero, cancel cold boost
-		sr.coldBoostTime = time.Time{}
-	}
-
-	if !sr.coldBoostTime.IsZero() && now.Before(sr.coldBoostTime.Add(coldBoostPeriod)) {
-		// Cold boost in progress
-		sr.decider.Status.ColdboostDesiredScale = 1
-		if now.Sub(sr.coldBoostTime) > coldBoostKsvcTriggerPeriod {
-			// Too many cold boosts, start up regular ksvc in parallel
-			sr.decider.Status.DesiredScale = sRes.DesiredPodCount
-		} else {
-			sr.decider.Status.DesiredScale = sRes.DesiredPodCount - 1
-		}
-	} else {
-		// Cold boost not started or is over, revert to normal
-		sr.decider.Status.DesiredScale = sRes.DesiredPodCount
-		sr.decider.Status.ColdboostDesiredScale = 0
-		sr.coldBoostTime = time.Time{}
-	}
 }
 
 // MultiScaler maintains a collection of UniScalers.

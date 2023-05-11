@@ -35,6 +35,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"knative.dev/serving/pkg/reconciler/autoscaling/kpa/coldstart"
 )
 
 type podCounter interface {
@@ -60,6 +61,10 @@ type autoscaler struct {
 	// specMux guards the current DeciderSpec.
 	specMux     sync.RWMutex
 	deciderSpec *DeciderSpec
+
+	// When was the current cold boost started.
+	// zero means no cold boost in progress.
+	coldBoostTime time.Time
 }
 
 // New creates a new instance of default autoscaler implementation.
@@ -310,12 +315,81 @@ func (a *autoscaler) Scale(logger *zap.SugaredLogger, now time.Time) ScaleResult
 	}
 
 	// TODO(panka) Implement DesiredColdPodCount
-	return ScaleResult{
+	sRes := ScaleResult{
 		DesiredPodCount:     desiredPodCount,
 		ExcessBurstCapacity: int32(excessBCF),
 		ScaleValid:          true,
 	}
+	err = a.updateScaleResultForColdBoost(&sRes, originalReadyPodsCount)
+	if err != nil {
+		logger.Errorf("Error updating scale result for cold boost %v", err)
+	}
+	return sRes
 }
+
+func (a *autoscaler) updateScaleResultForColdBoost(sRes *ScaleResult, originalReadyPodsCount int) error {
+	coldBoostEnabled, err := a.coldBoostEnabled()
+	if err != nil {
+		return err
+	}
+	
+	if !coldBoostEnabled {
+		return nil
+	}
+	
+	// TODO(pankaj) Unit test this function.
+	// This is a bit complex, here's the logic:
+	// We always cold boost when scaling from zero. On such a boost we mark the coldBoostTime.
+	// For coldBoostPeriod afterward, we indicate one cold boost pod and rest regular.
+	// Cold boost gets over in following ways:
+	// 1. After cold boost period is over
+	// 2. Desired scale drops to zero, i.e. there's no traffic
+	//
+	// After coldBoostKsvcTriggerPeriod we let regular ksvc scale up as well.
+	// Idea is that we don't want short bursts to start up both cold start
+	// and regular ksvc pod and pay double the price for these. But sustained
+	// traffic should trigger that scale up so cold start pod can be replaced.
+	// Overall, in occassional requests case, cold start pod can tackle the
+	// requests itself. In the more sustained requests scneario, cold start pod
+	// provides the boost then goes away in favor of the regular ksvc.
+	now := time.Now()
+	newDesiredScale := sRes.DesiredPodCount
+	if originalReadyPodsCount == 0 && a.coldBoostTime.IsZero() {
+		// Scaling from zero, set up cold boost
+		a.coldBoostTime = now
+	}
+
+	if newDesiredScale == 0 {
+		// Scaling back to zero, cancel cold boost
+		a.coldBoostTime = time.Time{}
+	}
+
+	if !a.coldBoostTime.IsZero() && now.Before(a.coldBoostTime.Add(coldBoostPeriod)) {
+		// Cold boost in progress
+		sRes.DesiredColdBoostPodCount = 1
+		if now.Sub(a.coldBoostTime) <= coldBoostKsvcTriggerPeriod {
+			// Inside cold start window but before the ksvc trigger period.
+			// regular ksvc scale to avoid spinning it up.
+			sRes.DesiredPodCount = sRes.DesiredPodCount - 1
+		}
+	}
+	return nil
+}
+
+func (a *autoscaler) coldBoostEnabled() (bool, error) {
+	coldStartSettings, err := coldstart.GetColdstartSettings(
+		context.TODO(),
+		a.namespace,
+		a.revision,
+	)
+
+	if err != nil {
+		return false, err
+	}
+
+	return coldStartSettings.ColdStartEnabled, nil
+}
+
 
 func (a *autoscaler) currentSpec() *DeciderSpec {
 	a.specMux.RLock()

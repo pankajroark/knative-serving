@@ -32,3 +32,7 @@ func ImageCache(rev kmeta.Accessor) string {
 func PA(rev kmeta.Accessor) string {
 	return rev.GetName()
 }
+
+func ColdDeployment(rev kmeta.Accessor) string {
+	return kmeta.ChildName(rev.GetName(), "-deployment-cold")
+}
