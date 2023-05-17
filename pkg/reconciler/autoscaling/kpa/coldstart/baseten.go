@@ -54,6 +54,9 @@ func postJsonBaseten(ctx context.Context, path string, payload any) ([]byte, err
 
 	client := &http.Client{}
 	resp, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
 	defer resp.Body.Close()
 	return ioutil.ReadAll(resp.Body)
 

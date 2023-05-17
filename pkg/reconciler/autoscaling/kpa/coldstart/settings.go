@@ -11,8 +11,8 @@ type RevisionKey struct {
 }
 
 type ColdStartSettings struct {
-	ColdStartEnabled bool
-	NodeSelector map[string]string
+	ColdStartEnabled bool `json:"cold_start_enabled"`
+	// NodeSelector map[string]string
 }
 
 

@@ -36,14 +36,18 @@ import (
 	autoscalingv1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
 	"knative.dev/serving/pkg/autoscaler/config/autoscalerconfig"
 	"knative.dev/serving/pkg/reconciler/autoscaling/config"
+	"knative.dev/serving/pkg/reconciler/autoscaling/kpa/coldstart"
 	kparesources "knative.dev/serving/pkg/reconciler/autoscaling/kpa/resources"
 	aresources "knative.dev/serving/pkg/reconciler/autoscaling/resources"
 	"knative.dev/serving/pkg/resources"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -368,12 +372,22 @@ func (ks *scaler) scale(ctx context.Context, pa *autoscalingv1alpha1.PodAutoscal
 	}
 
 	logger.Infof("Scaling from %d to %d", currentScale, desiredScale)
-	// TODO(pankaj) remove this
-	// if currentScale == 0 && desiredScale > 0 {
-	// 	err := InformBasetenScaleFromZero(ctx, ps)
-	// 	if err != nil {
-	// 		fmt.Println(err)
-	// 	}
-	// }
 	return desiredScale, ks.applyScale(ctx, pa, desiredScale, ps)
+}
+
+func (ks *scaler) scaleCold(ctx context.Context, pa *autoscalingv1alpha1.PodAutoscaler, sks *netv1alpha1.ServerlessService, desiredColdScale int32, podsLister corev1listers.PodLister) error {
+	logger := logging.FromContext(ctx)
+	ps, err := resources.GetScaleResource(pa.Namespace, pa.Spec.ScaleTargetRef, ks.listerFactory)
+	if err != nil {
+		return fmt.Errorf("failed to get scale target %v: %w", pa.Spec.ScaleTargetRef, err)
+	}
+	req, err := labels.NewRequirement("cold", selection.Equals, []string{"true"})
+	coldPods, err := podsLister.List(labels.Everything().Add(*req))
+	if len(coldPods) == int(desiredColdScale) {
+		return nil
+	}
+	psNew := ps.DeepCopy()
+	psNew.Spec.Replicas = &desiredColdScale
+	logger.Infof("coldstart to %d", desiredColdScale)
+	return coldstart.InformBasetenScaleFromZero(ctx, psNew)
 }

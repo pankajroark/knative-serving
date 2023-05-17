@@ -29,7 +29,6 @@ import (
 	"knative.dev/pkg/logging/logkey"
 	autoscalingv1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
 	"knative.dev/serving/pkg/autoscaler/metrics"
-	"knative.dev/serving/pkg/reconciler/autoscaling/kpa/coldstart"
 )
 
 // tickInterval is how often the Autoscaler evaluates the metrics
@@ -174,13 +173,23 @@ func (sr *scalerRunner) updateLatestScale(sRes ScaleResult) bool {
 
 	if sr.decider.Status.DesiredScale != sRes.DesiredPodCount ||
 		sr.decider.Status.ColdboostDesiredScale != sRes.DesiredColdBoostPodCount {
+			sr.logger.Infof(
+				"pankaj: Update latest scale because %d %d %d %d", 
+				sr.decider.Status.DesiredScale,
+				sRes.DesiredPodCount,
+				sr.decider.Status.ColdboostDesiredScale,
+				sRes.DesiredColdBoostPodCount)
 			sr.decider.Status.DesiredScale = sRes.DesiredPodCount
 			sr.decider.Status.ColdboostDesiredScale = sRes.DesiredColdBoostPodCount
-		ret = true
+			ret = true
 	}
 
 	// If sign has changed -- then we have to update KPA.
-	ret = ret || !sameSign(sr.decider.Status.ExcessBurstCapacity, sRes.ExcessBurstCapacity)
+	burstCapacitySignChanged := !sameSign(sr.decider.Status.ExcessBurstCapacity, sRes.ExcessBurstCapacity)
+	ret = ret || burstCapacitySignChanged
+	if burstCapacitySignChanged {
+			sr.logger.Infof("pankaj: Update latest scale because burst capacity sign changed")
+	}
 
 	// Update with the latest calculation anyway.
 	sr.decider.Status.ExcessBurstCapacity = sRes.ExcessBurstCapacity

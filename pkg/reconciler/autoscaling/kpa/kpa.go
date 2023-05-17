@@ -123,6 +123,13 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 		return fmt.Errorf("error scaling target: %w", err)
 	}
 
+	err = c.scaler.scaleCold(ctx, pa, sks, decider.Status.ColdboostDesiredScale, c.podsLister)
+	if err != nil {
+		// Pankaj: For now, coldstart pods are best effort, we don't fail if we can't.
+		// todo: log this
+		fmt.Errorf("error scaling cold start target: %w", err)
+	}
+
 	// TODO(pankaj) use decider.Status.ColdboostDesiredScale to scale cold boost deployment
 	// Get the node selector from baseten settings and create/update deployment
 	
