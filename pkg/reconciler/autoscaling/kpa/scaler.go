@@ -26,6 +26,7 @@ import (
 	"knative.dev/pkg/injection/clients/dynamicclient"
 	"knative.dev/pkg/logging"
 
+	corev1 "k8s.io/api/core/v1"
 	netapis "knative.dev/networking/pkg/apis/networking"
 	netv1alpha1 "knative.dev/networking/pkg/apis/networking/v1alpha1"
 	nethttp "knative.dev/networking/pkg/http"
@@ -386,8 +387,21 @@ func (ks *scaler) scaleCold(ctx context.Context, pa *autoscalingv1alpha1.PodAuto
 	if len(coldPods) == int(desiredColdScale) {
 		return nil
 	}
-	psNew := ps.DeepCopy()
-	psNew.Spec.Replicas = &desiredColdScale
+
+	allTerminating := true
+	for _, p := range coldPods {
+		switch p.Status.Phase {
+		case corev1.PodRunning:
+			if p.DeletionTimestamp == nil {
+				allTerminating = false
+			}
+		}
+	}
+	if desiredColdScale == 0 && allTerminating {
+		// There are cold start pods but they are all terminating
+		return nil
+	}
+	// return coldstart.InformBasetenScaleFromZero(ctx, psNew)
 	logger.Infof("coldstart to %d", desiredColdScale)
-	return coldstart.InformBasetenScaleFromZero(ctx, psNew)
+	return coldstart.ScaleColdStartPod(ctx, ps, desiredColdScale)
 }

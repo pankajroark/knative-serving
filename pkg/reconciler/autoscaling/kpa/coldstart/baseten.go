@@ -8,6 +8,13 @@ import (
 	"io/ioutil"
 	"net/http"
 
+	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"knative.dev/pkg/apis/duck"
+	kubeclient "knative.dev/pkg/client/injection/kube/client"
 	"knative.dev/pkg/logging"
 	autoscalingv1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
 )
@@ -59,5 +66,45 @@ func postJsonBaseten(ctx context.Context, path string, payload any) ([]byte, err
 	}
 	defer resp.Body.Close()
 	return ioutil.ReadAll(resp.Body)
+}
 
+func ScaleColdStartPod(ctx context.Context, ps *autoscalingv1alpha1.PodScalable, desiredScale int32) error {
+	// Create coldstart deployment spec if not exist
+	// Update replicas
+	coldPodName := fmt.Sprintf("%v-cold", ps.Name)
+	ns := ps.Namespace
+	c := kubeclient.Get(ctx)
+	_, err := c.CoreV1().Pods(ns).Get(ctx, coldPodName, metav1.GetOptions{})
+	podExists := true
+	if apierrors.IsNotFound(err) {
+		// Pod does not exist, create it
+		podExists = false
+	}
+	if desiredScale == 0 {
+		// Create pod if not exist
+		if !podExists {
+			podSpec := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: coldPodName,
+					Namespace: ns,
+					Labels: ps.Labels,
+					Annotations: ps.Annotations,
+				},
+				Spec: ps.Spec.Template.Spec,
+			} 
+			_, err := c.CoreV1().Pods(ns).Create(ctx, podSpec, metav1.CreateOptions{})
+			if err != nil {
+				return err
+			}
+		}
+	} else {
+		// Delete pod if exist
+		if podExists {
+			err := c.CoreV1().Pods(ns).Delete(ctx, coldPodName, metav1.DeleteOptions{})
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
