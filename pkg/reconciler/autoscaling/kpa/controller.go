@@ -41,6 +41,7 @@ import (
 	"knative.dev/serving/pkg/deployment"
 	areconciler "knative.dev/serving/pkg/reconciler/autoscaling"
 	"knative.dev/serving/pkg/reconciler/autoscaling/config"
+	"knative.dev/serving/pkg/reconciler/autoscaling/kpa/baseten"
 	"knative.dev/serving/pkg/reconciler/autoscaling/kpa/resources"
 )
 
@@ -84,7 +85,8 @@ func NewController(
 		configStore.WatchConfigs(cmw)
 		return controller.Options{ConfigStore: configStore}
 	})
-	c.scaler = newScaler(ctx, psInformerFactory, impl.EnqueueAfter)
+	coldBooster := baseten.ColdBooster{}
+	c.scaler = newScaler(ctx, psInformerFactory, impl.EnqueueAfter, coldBooster)
 
 	logger.Info("Setting up KPA-Class event handlers")
 

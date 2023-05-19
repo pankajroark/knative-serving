@@ -36,6 +36,7 @@ import (
 	"knative.dev/serving/pkg/autoscaler/config/autoscalerconfig"
 	"knative.dev/serving/pkg/reconciler/autoscaling/config"
 	kparesources "knative.dev/serving/pkg/reconciler/autoscaling/kpa/resources"
+	"knative.dev/serving/pkg/reconciler/autoscaling/kpa/baseten"
 	aresources "knative.dev/serving/pkg/reconciler/autoscaling/resources"
 	"knative.dev/serving/pkg/resources"
 
@@ -90,10 +91,11 @@ type scaler struct {
 	// For async probes.
 	probeManager asyncProber
 	enqueueCB    func(interface{}, time.Duration)
+	coldBooster baseten.ColdBooster
 }
 
 // newScaler creates a scaler.
-func newScaler(ctx context.Context, psInformerFactory duck.InformerFactory, enqueueCB func(interface{}, time.Duration)) *scaler {
+func newScaler(ctx context.Context, psInformerFactory duck.InformerFactory, enqueueCB func(interface{}, time.Duration), coldBooster baseten.ColdBooster) *scaler {
 	logger := logging.FromContext(ctx)
 	transport := pkgnet.NewProberTransport()
 	ks := &scaler{
@@ -116,6 +118,7 @@ func newScaler(ctx context.Context, psInformerFactory duck.InformerFactory, enqu
 			enqueueCB(arg, reenqeuePeriod)
 		}, transport),
 		enqueueCB: enqueueCB,
+		coldBooster: coldBooster,
 	}
 	return ks
 }
@@ -360,6 +363,8 @@ func (ks *scaler) scale(ctx context.Context, pa *autoscalingv1alpha1.PodAutoscal
 	if desiredScale == currentScale {
 		return desiredScale, nil
 	}
+
+	ks.coldBooster.Inform(ctx, currentScale, desiredScale, ps)
 
 	logger.Infof("Scaling from %d to %d", currentScale, desiredScale)
 	return desiredScale, ks.applyScale(ctx, pa, desiredScale, ps)
