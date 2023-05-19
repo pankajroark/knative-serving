@@ -91,11 +91,11 @@ type scaler struct {
 	// For async probes.
 	probeManager asyncProber
 	enqueueCB    func(interface{}, time.Duration)
-	coldBooster baseten.ColdBooster
+	coldBooster *baseten.ColdBooster
 }
 
 // newScaler creates a scaler.
-func newScaler(ctx context.Context, psInformerFactory duck.InformerFactory, enqueueCB func(interface{}, time.Duration), coldBooster baseten.ColdBooster) *scaler {
+func newScaler(ctx context.Context, psInformerFactory duck.InformerFactory, enqueueCB func(interface{}, time.Duration), coldBooster *baseten.ColdBooster) *scaler {
 	logger := logging.FromContext(ctx)
 	transport := pkgnet.NewProberTransport()
 	ks := &scaler{

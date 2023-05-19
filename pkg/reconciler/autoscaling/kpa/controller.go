@@ -85,7 +85,7 @@ func NewController(
 		configStore.WatchConfigs(cmw)
 		return controller.Options{ConfigStore: configStore}
 	})
-	coldBooster := baseten.ColdBooster{}
+	coldBooster := baseten.NewColdBooster(c.podsLister)
 	c.scaler = newScaler(ctx, psInformerFactory, impl.EnqueueAfter, coldBooster)
 
 	logger.Info("Setting up KPA-Class event handlers")
