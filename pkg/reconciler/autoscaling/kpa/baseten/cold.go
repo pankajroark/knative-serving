@@ -3,6 +3,7 @@ package baseten
 import (
 	"context"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -19,6 +20,53 @@ import (
 type ColdBooster struct {
 	deployment *appsv1.Deployment
 	podsLister corev1listers.PodLister
+	coldBoost *ColdBoost
+}
+
+type ColdBoost struct {
+	deployment *appsv1.Deployment
+	podsLister corev1listers.PodLister
+	stopCh chan struct{}
+	ticker *time.Ticker
+	done bool
+}
+
+func NewColdBoost(podsLister corev1listers.PodLister) *ColdBoost{
+	stopCh := make(chan struct{})
+	c := &ColdBoost{
+		stopCh: stopCh,
+		ticker: time.NewTicker(2 * time.Second),
+		done: false,
+	}
+	c.setColdStartReplicaCount(context.TODO(), 1)
+	go func() {
+		defer c.End()
+		for {
+			select {
+			case <-c.stopCh:
+				return
+			case <-c.ticker.C:
+				// do sth
+				// If orig ksvc pod has come up then send stop signal
+			}
+		}
+	}()
+	return c
+}
+
+func (c *ColdBoost) Stop() {
+	if !c.done {
+		c.stopCh <- struct{}{}
+	}
+}
+
+func (c *ColdBoost) End() {
+	if !c.done {
+		c.setColdStartReplicaCount(context.TODO(), 0)
+		c.ticker.Stop()
+		close(c.stopCh)
+		c.done = true
+	}
 }
 
 func NewColdBooster(podsLister corev1listers.PodLister) *ColdBooster {
@@ -33,18 +81,22 @@ func (c *ColdBooster) Inform(ctx context.Context, currentScale int32, desiredSca
 	}
 	ro := runtime.Object(ps)
 	c.deployment = ro.(*appsv1.Deployment)
-	if desiredScale == 0 {
-		// Scale to zero
-		return c.setColdStartReplicaCount(ctx, 0)
-	}
 	if currentScale == 0 {
-		// Scale from zero
-		return c.setColdStartReplicaCount(ctx, 1)
+		// Scale from zero, start cold boost if not in progress already
+		if c.coldBoost == nil || c.coldBoost.done {
+			c.coldBoost = NewColdBoost(c.podsLister)
+		}
+	}
+	if desiredScale == 0 {
+		// Scale to zero, shut down cold boost if running
+		if c.coldBoost != nil {
+			c.coldBoost.Stop()
+		}
 	}
 	return nil
 }
 
-func (c *ColdBooster) setColdStartReplicaCount(ctx context.Context, desiredScale int32) error {
+func (c *ColdBoost) setColdStartReplicaCount(ctx context.Context, desiredScale int32) error {
 	kc := kubeclient.Get(ctx)
 	deploy := c.deployment
 	ns := deploy.Namespace
