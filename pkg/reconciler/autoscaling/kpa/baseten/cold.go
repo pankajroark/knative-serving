@@ -92,6 +92,7 @@ func NewColdBoost(podsLister corev1listers.PodLister, kubeClient kubernetes.Inte
 		for {
 			select {
 			case <-c.stopCh:
+				c.logger.Info("Received stop, shutting down")
 				return
 			case <-c.ticker.C:
 				// If orig ksvc pod has come up then end cold boost
@@ -103,6 +104,7 @@ func NewColdBoost(podsLister corev1listers.PodLister, kubeClient kubernetes.Inte
 					continue
 				}
 				if podReady {
+					c.logger.Info("At least one pod of ksvc is ready, shutting down")
 					return
 				}
 			}
@@ -123,6 +125,7 @@ func (c *ColdBoost) Stop() {
 
 func (c *ColdBoost) End() {
 	if !c.Done() {
+		c.logger.Info("Setting cold start replica count to 0")
 		c.setColdStartReplicaCount(context.TODO(), 0)
 		c.ticker.Stop()
 		c.done.Store(true)
@@ -146,7 +149,7 @@ func (c *ColdBoost) origKsvcPodReady() (error, bool) {
 	origKsvcPodLabels := labels.Everything().Add(*revisionLabelSelector).Add(*notColdLabelSelector)
 	pods, err := c.podsLister.Pods(dep.Namespace).List(origKsvcPodLabels)
 	for _, p := range pods {
-		if podReady(p) {
+		if p.Status.Phase == corev1.PodRunning && isPodReady(p) && p.DeletionTimestamp == nil {
 			return nil, true
 		}
 	}
@@ -204,16 +207,6 @@ func coldDeploymentName(name string) string {
 	return fmt.Sprintf("%v-cold", name)
 }
 
-func podReady(p *corev1.Pod) bool {
-	for _, cond := range p.Status.Conditions {
-		if cond.Type == corev1.PodReady {
-			return cond.Status == corev1.ConditionTrue
-		}
-	}
-	// No ready status, probably not even running.
-	return false
-}
-
 func podScalableToDeployment(ps *autoscalingv1alpha1.PodScalable) (*appsv1.Deployment, error) {
 	psCopy := ps.DeepCopy()
 	psCopy.ResourceVersion = ""
@@ -228,4 +221,14 @@ func podScalableToDeployment(ps *autoscalingv1alpha1.PodScalable) (*appsv1.Deplo
 		return nil, err
 	}
 	return deployment, nil
+}
+
+func isPodReady(p *corev1.Pod) bool {
+	for _, cond := range p.Status.Conditions {
+		if cond.Type == corev1.PodReady {
+			return cond.Status == corev1.ConditionTrue
+		}
+	}
+	// No ready status, probably not even running.
+	return false
 }
