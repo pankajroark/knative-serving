@@ -29,7 +29,7 @@ func FetchColdstartSettings(ctx context.Context, namespace, revision string) (*C
 	return &result, nil
 }
 
-func postJsonBaseten(ctx context.Context, path string, payload any) ([]byte, error) {
+func postJsonBaseten(ctx context.Context, path string, payload interface{}) ([]byte, error) {
 	logger := logging.FromContext(ctx)
 	payload_bytes, err := json.Marshal(payload)
 	if err != nil {

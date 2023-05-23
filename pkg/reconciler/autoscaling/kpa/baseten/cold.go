@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	jsonpatch "github.com/evanphx/json-patch/v5"
 	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -42,6 +43,15 @@ func NewColdBooster(podsLister corev1listers.PodLister, kubeClient kubernetes.In
 
 func (c *ColdBooster) Inform(ctx context.Context, currentScale int32, desiredScale int32, ps *autoscalingv1alpha1.PodScalable) error {
 	logger := logging.FromContext(ctx)
+	coldStartSettings, err := GetColdstartSettings(ctx, ps.Namespace, ps.Name)
+	if err != nil {
+		return err
+	}
+
+	if !coldStartSettings.Enabled {
+		return nil
+	}
+
 	if currentScale == desiredScale {
 		return nil
 	}
@@ -54,7 +64,7 @@ func (c *ColdBooster) Inform(ctx context.Context, currentScale int32, desiredSca
 		// Scale from zero, start cold boost if not in progress already
 		if c.coldBoost == nil || c.coldBoost.Done() {
 			logger.Infof("ColdBoost for %s.%s: starting cold boost", deployment.Namespace, deployment.Name)
-			c.coldBoost = NewColdBoost(c.podsLister, c.kubeClient, deployment, logger)
+			c.coldBoost = NewColdBoost(c.podsLister, c.kubeClient, deployment, *coldStartSettings, logger)
 		}
 	}
 	if desiredScale == 0 {
@@ -71,17 +81,24 @@ type ColdBoost struct {
 	podsLister corev1listers.PodLister
 	kubeClient kubernetes.Interface
 	deployment *appsv1.Deployment
+	coldStartSettings ColdStartSettings
 	stopCh chan struct{}
 	ticker *time.Ticker
 	done atomic.Bool
 	logger *zap.SugaredLogger
 }
 
-func NewColdBoost(podsLister corev1listers.PodLister, kubeClient kubernetes.Interface, deployment *appsv1.Deployment, logger *zap.SugaredLogger) *ColdBoost{
+func NewColdBoost(
+	podsLister corev1listers.PodLister, 
+	kubeClient kubernetes.Interface, 
+	deployment *appsv1.Deployment, 
+	coldStartSettings ColdStartSettings,
+	logger *zap.SugaredLogger) *ColdBoost{
 	c := &ColdBoost{
 		podsLister: podsLister,
 		kubeClient: kubeClient,
 		deployment: deployment.DeepCopy(),
+		coldStartSettings: coldStartSettings,
 		stopCh: make(chan struct{}),
 		ticker: time.NewTicker(2 * time.Second),
 		logger: logger,
@@ -243,6 +260,10 @@ func (c *ColdBoost) createColdDeployment(ctx context.Context, deployments v1.Dep
 	coldDeployment := c.deployment.DeepCopy()
 	coldDeployment.Name = genColdDeploymentName(c.deployment.Name)
 	coldDeployment.Spec.Replicas = &desiredScale
+	// err := c.applyColdPatch(coldDeployment)
+	// if err != nil {
+	// 	return err
+	// }
 	coldDeployment.Labels[coldLabel] = "true"
 	_, err := deployments.Create(ctx, coldDeployment, metav1.CreateOptions{})
 	if err != nil {
@@ -270,5 +291,29 @@ func (c *ColdBoost) patchColdDeployment(ctx context.Context, deployments v1.Depl
 		return err
 	}
 	c.logger.Infof("%s successfully updated cold deployment", c.logPrefix())
+	return nil
+}
+
+func (c *ColdBoost) applyColdPatch(coldDeployment *appsv1.Deployment) (error) {
+	json_patch_string := c.coldStartSettings.PodSpecJsonPatch
+	podSpec := coldDeployment.Spec.Template.Spec
+	origPodBytes, err := json.Marshal(podSpec)
+	if err != nil {
+		return err
+	}
+	patch, err := jsonpatch.DecodePatch([]byte(json_patch_string))
+	if err != nil {
+		return err
+	}
+	modified, err := patch.Apply(origPodBytes)
+	if err != nil {
+		return err
+	}
+	newPodSpec := new(corev1.PodSpec)	
+	err = json.Unmarshal(modified, newPodSpec)
+	if err != nil {
+		return err
+	}
+	coldDeployment.Spec.Template.Spec = *newPodSpec
 	return nil
 }
