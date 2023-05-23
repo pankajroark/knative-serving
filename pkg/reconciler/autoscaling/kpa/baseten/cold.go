@@ -14,13 +14,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	v1 "k8s.io/client-go/kubernetes/typed/apps/v1"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	"knative.dev/pkg/apis/duck"
 	"knative.dev/pkg/logging"
 	autoscalingv1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
 	"knative.dev/serving/pkg/apis/serving"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 type ColdBooster struct {
@@ -28,6 +29,9 @@ type ColdBooster struct {
 	kubeClient kubernetes.Interface
 	coldBoost *ColdBoost
 }
+
+const coldLabel = "cold"
+const coldDeploymentSuffix = "-cold"
 
 func NewColdBooster(podsLister corev1listers.PodLister, kubeClient kubernetes.Interface) *ColdBooster {
 	return &ColdBooster{
@@ -49,14 +53,14 @@ func (c *ColdBooster) Inform(ctx context.Context, currentScale int32, desiredSca
 	if currentScale == 0 {
 		// Scale from zero, start cold boost if not in progress already
 		if c.coldBoost == nil || c.coldBoost.Done() {
-			logger.Info("Starting cold boost")
+			logger.Infof("ColdBoost for %s.%s: starting cold boost", deployment.Namespace, deployment.Name)
 			c.coldBoost = NewColdBoost(c.podsLister, c.kubeClient, deployment, logger)
 		}
 	}
 	if desiredScale == 0 {
 		// Scale to zero, shut down cold boost if running
 		if c.coldBoost != nil {
-			logger.Info("Stopping cold boost")
+			logger.Infof("ColdBoost for %s.%s: stopping cold boost", deployment.Namespace, deployment.Name)
 			c.coldBoost.Stop()
 		}
 	}
@@ -77,36 +81,36 @@ func NewColdBoost(podsLister corev1listers.PodLister, kubeClient kubernetes.Inte
 	c := &ColdBoost{
 		podsLister: podsLister,
 		kubeClient: kubeClient,
-		deployment: deployment,
+		deployment: deployment.DeepCopy(),
 		stopCh: make(chan struct{}),
 		ticker: time.NewTicker(2 * time.Second),
 		logger: logger,
 	}
-	logger.Info("Setting cold start replicas to 1")
+	logger.Infof("%s setting cold boost deployment replicas to 1", c.logPrefix())
 	err := c.setColdStartReplicaCount(context.TODO(), 1)
 	if err != nil {
-		logger.Warnf("Unable to start cold start deployment %v", err)
+		logger.Warnf("%s unable to set cold boost deployment replicas to 1: %v", c.logPrefix(), err)
 	}
 	go func() {
 		defer c.End()
 		for {
 			select {
 			case <-c.stopCh:
-				c.logger.Info("Received stop, shutting down")
+				c.logger.Infof("%s received stop message, shutting down", c.logPrefix())
 				return
 			case <-c.ticker.C:
 				// If orig ksvc pod has come up then end cold boost
-				c.logger.Info("Ticker received, checking orig ksvc ready pods")
+				c.logger.Debugf("%s tick received, checking orig ksvc ready pods", c.logPrefix())
 				err, podReady := c.origKsvcPodReady()
-				c.logger.Infof("%d pods are ready for original ksvc", podReady)
 				if err != nil {
-					c.logger.Warnf("Unable to get ready status for pods of %s.%s", c.deployment.Namespace, c.deployment.Name)
+					c.logger.Warnf("%s unable to get ready status for pods", c.logPrefix())
 					continue
 				}
 				if podReady {
-					c.logger.Info("At least one pod of ksvc is ready, shutting down")
+					c.logger.Infof("%s at least one pod of ksvc is ready, shutting down", c.logPrefix())
 					return
 				}
+				c.logger.Debugf("%s pods are not ready for original ksvc", c.logPrefix())
 			}
 		}
 	}()
@@ -125,7 +129,7 @@ func (c *ColdBoost) Stop() {
 
 func (c *ColdBoost) End() {
 	if !c.Done() {
-		c.logger.Info("Setting cold start replica count to 0")
+		c.logger.Infof("%s setting cold start replica count to 0", c.logPrefix())
 		c.setColdStartReplicaCount(context.TODO(), 0)
 		c.ticker.Stop()
 		c.done.Store(true)
@@ -136,78 +140,58 @@ func (c *ColdBoost) End() {
 
 func (c *ColdBoost) origKsvcPodReady() (error, bool) {
 	dep := c.deployment
-	// c.logger.Infof("deployment: %v", dep)
 	revKey := serving.RevisionLabelKey
 	revisionLabelSelector, err := labels.NewRequirement(revKey, selection.Equals, []string{dep.Labels[revKey]})
 	if err != nil {
 		return err, false
 	}
-	notColdLabelSelector, err := labels.NewRequirement("cold", selection.DoesNotExist, []string{})
+	notColdLabelSelector, err := labels.NewRequirement(coldLabel, selection.DoesNotExist, []string{})
 	if err != nil {
 		return err, false
 	}
 	origKsvcPodLabels := labels.Everything().Add(*revisionLabelSelector).Add(*notColdLabelSelector)
 	pods, err := c.podsLister.Pods(dep.Namespace).List(origKsvcPodLabels)
-	for _, p := range pods {
-		if p.Status.Phase == corev1.PodRunning && isPodReady(p) && p.DeletionTimestamp == nil {
-			return nil, true
-		}
+	if err != nil {
+		return err, false
 	}
-	return nil, false
+	return nil, atLeastOneReadyPod(pods)
 }
-
 
 func (c *ColdBoost) setColdStartReplicaCount(ctx context.Context, desiredScale int32) error {
-	deploy := c.deployment
-	ns := deploy.Namespace
+	origDeployment := c.deployment
+	ns := origDeployment.Namespace
 	deployments := c.kubeClient.AppsV1().Deployments(ns)
-	coldDeployment, err := deployments.Get(ctx, coldDeploymentName(deploy.Name), metav1.GetOptions{})
+	coldDeployment, err := existingDeployment(ctx, c.kubeClient, ns, genColdDeploymentName(origDeployment.Name))
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			c.logger.Info("Cold deployment not found, creating")
-			// Deployment does not exist, create it
-			coldDeployment = deploy.DeepCopy()
-			coldDeployment.Name = coldDeploymentName(deploy.Name)
-			coldDeployment.Spec.Replicas = &desiredScale
-			coldDeployment.Labels["cold"] = "true"
-			coldDeployment, err = deployments.Create(ctx, coldDeployment, metav1.CreateOptions{})
-			if err != nil {
-				c.logger.Infof("Unable to create cold deployment %v", err)
-			} else {
-				c.logger.Info("Successfully created cold deployment")
-			}
-		} else {
-			return err
-		}
-	} else {
-		if coldDeployment.Spec.Replicas != &desiredScale {
-
-			coldDeploymentNew := coldDeployment.DeepCopy()
-			coldDeploymentNew.Spec.Replicas = &desiredScale
-			patch, err := duck.CreatePatch(coldDeployment, coldDeploymentNew)
-			if err != nil {
-				return err
-			}
-			patchBytes, err := patch.MarshalJSON()
-			if err != nil {
-				return err
-			}
-			_, err = deployments.Patch(ctx, coldDeployment.Name, types.JSONPatchType, patchBytes, metav1.PatchOptions{})
-			if err != nil {
-				c.logger.Infof("Unable to update cold deployment %v", err)
-			} else {
-				c.logger.Info("Successfully updated cold deployment")
-			}
-		}
+		return err
 	}
-	return err
+	if coldDeployment == nil {
+			c.logger.Infof("%s cold deployment not found, creating", c.logPrefix())
+			return c.createColdDeployment(ctx, deployments, desiredScale)
+	}
+	// Cold deployment exists
+	if coldDeployment.Spec.Replicas == &desiredScale {
+		return nil
+	}
+	return c.patchColdDeployment(ctx, deployments, coldDeployment, desiredScale)
 }
 
-func coldDeploymentName(name string) string {
-	return fmt.Sprintf("%v-cold", name)
+func (c *ColdBoost) logPrefix() string {
+	if c.deployment != nil {
+		fullDeploymentName := fmt.Sprintf("%s.%s", c.deployment.Namespace, c.deployment.Name)
+		return fmt.Sprintf("ColdBoost for %s:", fullDeploymentName)
+	}
+	return "ColdBoost:"
+}
+
+func genColdDeploymentName(name string) string {
+	return fmt.Sprintf("%v%s", name, coldDeploymentSuffix)
 }
 
 func podScalableToDeployment(ps *autoscalingv1alpha1.PodScalable) (*appsv1.Deployment, error) {
+	// Use json Marshal/Unmarshal to convert from PodScalable to Deployment.
+	// [Pankaj] At least for baseten's set up PodScalable is always the deployment, but can't
+	// seem to find an easy way to convert, so resorting to this.
 	psCopy := ps.DeepCopy()
 	psCopy.ResourceVersion = ""
 	psCopy.UID = ""
@@ -223,7 +207,7 @@ func podScalableToDeployment(ps *autoscalingv1alpha1.PodScalable) (*appsv1.Deplo
 	return deployment, nil
 }
 
-func isPodReady(p *corev1.Pod) bool {
+func isPodConditionReady(p *corev1.Pod) bool {
 	for _, cond := range p.Status.Conditions {
 		if cond.Type == corev1.PodReady {
 			return cond.Status == corev1.ConditionTrue
@@ -231,4 +215,60 @@ func isPodReady(p *corev1.Pod) bool {
 	}
 	// No ready status, probably not even running.
 	return false
+}
+
+func atLeastOneReadyPod(pods []*corev1.Pod) bool {
+	for _, p := range pods {
+		if p.Status.Phase == corev1.PodRunning && isPodConditionReady(p) && p.DeletionTimestamp == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func existingDeployment(ctx context.Context, kubeClient kubernetes.Interface, namespace string, name string) (*appsv1.Deployment, error) {
+	deployments := kubeClient.AppsV1().Deployments(namespace)
+	deployment, err := deployments.Get(ctx, name, metav1.GetOptions{})
+	if err == nil {
+		return deployment, err
+	}
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	return nil, err
+}
+
+func (c *ColdBoost) createColdDeployment(ctx context.Context, deployments v1.DeploymentInterface, desiredScale int32) error {
+	// Deployment does not exist, create it
+	coldDeployment := c.deployment.DeepCopy()
+	coldDeployment.Name = genColdDeploymentName(c.deployment.Name)
+	coldDeployment.Spec.Replicas = &desiredScale
+	coldDeployment.Labels[coldLabel] = "true"
+	_, err := deployments.Create(ctx, coldDeployment, metav1.CreateOptions{})
+	if err != nil {
+		c.logger.Infof("%s unable to create cold deployment %v", c.logPrefix(), err)
+		return err
+	}
+	c.logger.Infof("%s successfully created cold deployment", c.logPrefix())
+	return nil
+}
+
+func (c *ColdBoost) patchColdDeployment(ctx context.Context, deployments v1.DeploymentInterface, coldDeployment *appsv1.Deployment, desiredScale int32) error {
+	coldDeploymentNew := coldDeployment.DeepCopy()
+	coldDeploymentNew.Spec.Replicas = &desiredScale
+	patch, err := duck.CreatePatch(coldDeployment, coldDeploymentNew)
+	if err != nil {
+		return err
+	}
+	patchBytes, err := patch.MarshalJSON()
+	if err != nil {
+		return err
+	}
+	_, err = deployments.Patch(ctx, coldDeployment.Name, types.JSONPatchType, patchBytes, metav1.PatchOptions{})
+	if err != nil {
+		c.logger.Infof("%s unable to update cold deployment %v", c.logPrefix(), err)
+		return err
+	}
+	c.logger.Infof("%s successfully updated cold deployment", c.logPrefix())
+	return nil
 }
