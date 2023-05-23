@@ -19,6 +19,7 @@ package kpa
 import (
 	"context"
 
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 
 	networkingclient "knative.dev/networking/pkg/client/injection/client"
@@ -51,6 +52,7 @@ func NewController(
 	ctx context.Context,
 	cmw configmap.Watcher,
 	deciders resources.Deciders,
+	kubeClient kubernetes.Interface,
 ) *controller.Impl {
 	logger := logging.FromContext(ctx)
 	paInformer := painformer.Get(ctx)
@@ -85,7 +87,7 @@ func NewController(
 		configStore.WatchConfigs(cmw)
 		return controller.Options{ConfigStore: configStore}
 	})
-	coldBooster := baseten.NewColdBooster(c.podsLister)
+	coldBooster := baseten.NewColdBooster(c.podsLister, kubeClient)
 	c.scaler = newScaler(ctx, psInformerFactory, impl.EnqueueAfter, coldBooster)
 
 	logger.Info("Setting up KPA-Class event handlers")

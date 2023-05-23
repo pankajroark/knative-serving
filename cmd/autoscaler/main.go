@@ -144,7 +144,7 @@ func main() {
 		uniScalerFactoryFunc(podLister, collector), logger)
 
 	controllers := []*controller.Impl{
-		kpa.NewController(ctx, cmw, multiScaler),
+		kpa.NewController(ctx, cmw, multiScaler, kubeclient.Get(ctx)),
 		metric.NewController(ctx, cmw, collector),
 	}
 

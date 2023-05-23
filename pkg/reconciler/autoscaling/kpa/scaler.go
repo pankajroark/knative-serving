@@ -364,7 +364,10 @@ func (ks *scaler) scale(ctx context.Context, pa *autoscalingv1alpha1.PodAutoscal
 		return desiredScale, nil
 	}
 
-	ks.coldBooster.Inform(ctx, currentScale, desiredScale, ps)
+	err = ks.coldBooster.Inform(ctx, currentScale, desiredScale, ps)
+	if err != nil {
+		logger.Warnf("Unable to inform cold booster %v", err)
+	}
 
 	logger.Infof("Scaling from %d to %d", currentScale, desiredScale)
 	return desiredScale, ks.applyScale(ctx, pa, desiredScale, ps)
