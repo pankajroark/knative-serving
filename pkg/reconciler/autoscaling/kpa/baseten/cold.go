@@ -255,16 +255,24 @@ func existingDeployment(ctx context.Context, kubeClient kubernetes.Interface, na
 	return nil, err
 }
 
-func (c *ColdBoost) createColdDeployment(ctx context.Context, deployments v1.DeploymentInterface, desiredScale int32) error {
-	// Deployment does not exist, create it
+func (c *ColdBoost) generateColdDeploymentSpec(desiredScale int32) (*appsv1.Deployment, error) {
 	coldDeployment := c.deployment.DeepCopy()
 	coldDeployment.Name = genColdDeploymentName(c.deployment.Name)
 	coldDeployment.Spec.Replicas = &desiredScale
+	coldDeployment.Spec.Template.Labels[coldLabel] = "true"
 	err := c.applyColdPatch(coldDeployment)
+	if err != nil {
+		return nil, err
+	}
+	return coldDeployment, nil
+}
+
+func (c *ColdBoost) createColdDeployment(ctx context.Context, deployments v1.DeploymentInterface, desiredScale int32) error {
+	// Deployment does not exist, create it
+	coldDeployment, err := c.generateColdDeploymentSpec(desiredScale)
 	if err != nil {
 		return err
 	}
-	coldDeployment.Spec.Template.Labels[coldLabel] = "true"
 	_, err = deployments.Create(ctx, coldDeployment, metav1.CreateOptions{})
 	if err != nil {
 		c.logger.Infof("%s unable to create cold deployment %v", c.logPrefix(), err)
@@ -275,8 +283,12 @@ func (c *ColdBoost) createColdDeployment(ctx context.Context, deployments v1.Dep
 }
 
 func (c *ColdBoost) patchColdDeployment(ctx context.Context, deployments v1.DeploymentInterface, coldDeployment *appsv1.Deployment, desiredScale int32) error {
-	coldDeploymentNew := coldDeployment.DeepCopy()
-	coldDeploymentNew.Spec.Replicas = &desiredScale
+	// Generate the expected new state of cold deployment
+	coldDeploymentNew, err := c.generateColdDeploymentSpec(desiredScale)
+	if err != nil {
+		return err
+	}
+	// Now take a difference from current cold deployment
 	patch, err := duck.CreatePatch(coldDeployment, coldDeploymentNew)
 	if err != nil {
 		return err

@@ -22,10 +22,16 @@ type CachedColdStartSettings struct {
 	cachedAt time.Time
 }
 
+// TODO(pankaj) Get this from ConfigMap
+const cacheEnabled = true  
 const coldStartSettingsTTL = 5 * time.Minute
 var settingsCache = map[ServiceKey]CachedColdStartSettings{}
 
 func GetColdstartSettings(ctx context.Context, namespace, service string) (*ColdStartSettings, error) {
+	if !cacheEnabled {
+		return FetchColdstartSettings(ctx, namespace, service)
+	}
+
 	now := time.Now()
 	key := ServiceKey{
 		serviceName: service,
