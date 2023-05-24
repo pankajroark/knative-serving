@@ -12,9 +12,9 @@ import (
 )
 
 
-func FetchColdstartSettings(ctx context.Context, namespace, revision string) (*ColdStartSettings, error) {
-	body, err := postJsonBaseten(ctx, "/ksvc_revision_cold_start_settings", map[string]string{
-		"revision": revision,
+func FetchColdstartSettings(ctx context.Context, namespace, service string) (*ColdStartSettings, error) {
+	body, err := postJsonBaseten(ctx, "/ksvc_cold_boost_settings", map[string]string{
+		"service": service,
 		"namespace": namespace,
 	})
 	if err != nil {

@@ -260,12 +260,12 @@ func (c *ColdBoost) createColdDeployment(ctx context.Context, deployments v1.Dep
 	coldDeployment := c.deployment.DeepCopy()
 	coldDeployment.Name = genColdDeploymentName(c.deployment.Name)
 	coldDeployment.Spec.Replicas = &desiredScale
-	// err := c.applyColdPatch(coldDeployment)
-	// if err != nil {
-	// 	return err
-	// }
-	coldDeployment.Labels[coldLabel] = "true"
-	_, err := deployments.Create(ctx, coldDeployment, metav1.CreateOptions{})
+	err := c.applyColdPatch(coldDeployment)
+	if err != nil {
+		return err
+	}
+	coldDeployment.Spec.Template.Labels[coldLabel] = "true"
+	_, err = deployments.Create(ctx, coldDeployment, metav1.CreateOptions{})
 	if err != nil {
 		c.logger.Infof("%s unable to create cold deployment %v", c.logPrefix(), err)
 		return err
@@ -296,6 +296,7 @@ func (c *ColdBoost) patchColdDeployment(ctx context.Context, deployments v1.Depl
 
 func (c *ColdBoost) applyColdPatch(coldDeployment *appsv1.Deployment) (error) {
 	json_patch_string := c.coldStartSettings.PodSpecJsonPatch
+	c.logger.Infof("json patch: %s", json_patch_string)
 	podSpec := coldDeployment.Spec.Template.Spec
 	origPodBytes, err := json.Marshal(podSpec)
 	if err != nil {

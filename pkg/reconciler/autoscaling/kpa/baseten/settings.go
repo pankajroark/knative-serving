@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-type RevisionKey struct {
-	revisionName string
+type ServiceKey struct {
+	serviceName string
 	namespace string
 }
 
@@ -23,17 +23,17 @@ type CachedColdStartSettings struct {
 }
 
 const coldStartSettingsTTL = 5 * time.Minute
-var settingsCache = map[RevisionKey]CachedColdStartSettings{}
+var settingsCache = map[ServiceKey]CachedColdStartSettings{}
 
-func GetColdstartSettings(ctx context.Context, namespace, revision string) (*ColdStartSettings, error) {
+func GetColdstartSettings(ctx context.Context, namespace, service string) (*ColdStartSettings, error) {
 	now := time.Now()
-	key := RevisionKey{
-		revisionName: revision,
+	key := ServiceKey{
+		serviceName: service,
 		namespace: namespace,
 	}
 	val, ok := settingsCache[key]
 	if !ok || val.cachedAt.Add(coldStartSettingsTTL).Before(now){
-		settings, err := FetchColdstartSettings(ctx, namespace, revision)
+		settings, err := FetchColdstartSettings(ctx, namespace, service)
 		if err != nil {
 			return nil, err
 		}
