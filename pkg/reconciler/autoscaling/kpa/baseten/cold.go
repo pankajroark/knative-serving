@@ -43,7 +43,7 @@ func NewColdBooster(podsLister corev1listers.PodLister, kubeClient kubernetes.In
 
 func (c *ColdBooster) Inform(ctx context.Context, currentScale int32, desiredScale int32, ps *autoscalingv1alpha1.PodScalable) error {
 	logger := logging.FromContext(ctx)
-	coldStartSettings, err := GetColdstartSettings(ctx, ps.Namespace, ps.Name)
+	coldStartSettings, err := GetColdstartSettings(ctx, ps.Namespace, ps.Labels["serving.knative.dev/service"])
 	if err != nil {
 		return err
 	}
@@ -234,9 +234,19 @@ func isPodConditionReady(p *corev1.Pod) bool {
 	return false
 }
 
+func arePodContainersReady(p *corev1.Pod) bool {
+	for _, containerStatus := range p.Status.ContainerStatuses {
+		if !containerStatus.Ready {
+			return false
+		}
+	}
+	// No ready status, probably not even running.
+	return true
+}
+
 func atLeastOneReadyPod(pods []*corev1.Pod) bool {
 	for _, p := range pods {
-		if p.Status.Phase == corev1.PodRunning && isPodConditionReady(p) && p.DeletionTimestamp == nil {
+		if p.Status.Phase == corev1.PodRunning && isPodConditionReady(p) && arePodContainersReady(p) && p.DeletionTimestamp == nil {
 			return true
 		}
 	}
